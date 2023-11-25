@@ -11,6 +11,7 @@
 
 #define ROOT_NODE_ID 0
 #define NOT_VISITED_MARKER -1
+#define VERBOSE 0
 
 void vertex_set_clear(vertex_set* list) {
     list->count = 0;
@@ -69,9 +70,8 @@ void top_down_step(
     // going through all the nodes on the frontier
     // first we notice that each node can add to the frontier independently
 
-    #pragma omp parallel for
+    #pragma omp parallel for 
     for (int i=0; i<frontier->count; i++) {
-
         int node = frontier->vertices[i];
 
         // get the start and end for the chunk of neighbors for this node
@@ -79,19 +79,16 @@ void top_down_step(
         int end_edge = (node == g->num_nodes - 1)
                            ? g->num_edges
                            : g->outgoing_starts[node + 1];
-
         // attempt to add all neighbors to the new frontier
         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
             int outgoing = g->outgoing_edges[neighbor];
-            // we do not wish to add any neighbors that already exists in our frontier 
+            // we do not wish to add any neighbors that already exist in our frontier 
             if (distances[outgoing] == NOT_VISITED_MARKER) {
                 distances[outgoing] = distances[node] + 1;
 
-                int index;
-                #pragma omp critical 
-                {
+                int index = new_frontier->count;
+                while (!__sync_bool_compare_and_swap(&new_frontier->count, index, new_frontier->count+1)) {
                     index = new_frontier->count;
-                    new_frontier->count++;
                 }
                 new_frontier->vertices[index] = outgoing;
             }
