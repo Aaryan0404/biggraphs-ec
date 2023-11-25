@@ -25,6 +25,40 @@ void vertex_set_init(vertex_set* list, int count) {
 // Take one step of "top-down" BFS.  For each vertex on the frontier,
 // follow all outgoing edges, and add all neighboring vertices to the
 // new_frontier.
+// void top_down_step(
+//     Graph g,
+//     vertex_set* frontier,
+//     vertex_set* new_frontier,
+//     int* distances)
+// {
+
+//     // going through all the nodes on the frontier
+//     for (int i=0; i<frontier->count; i++) {
+
+//         int node = frontier->vertices[i];
+
+//         // get the start and end for the chunk of neighbors for this node
+//         int start_edge = g->outgoing_starts[node];
+//         int end_edge = (node == g->num_nodes - 1)
+//                            ? g->num_edges
+//                            : g->outgoing_starts[node + 1];
+
+//         // attempt to add all neighbors to the new frontier
+//         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
+//             int outgoing = g->outgoing_edges[neighbor];
+//             // we do not wish to add any neighbors that already exists in our frontier 
+//             if (distances[outgoing] == NOT_VISITED_MARKER) {
+//                 distances[outgoing] = distances[node] + 1;
+//                 int index = new_frontier->count++;
+//                 new_frontier->vertices[index] = outgoing;
+//             }
+//         }
+//     }
+// }
+ 
+
+
+// BEGINNING OF NEW TOP_DOWN_STEP
 void top_down_step(
     Graph g,
     vertex_set* frontier,
@@ -32,10 +66,15 @@ void top_down_step(
     int* distances)
 {
 
+    // going through all the nodes on the frontier
+    // first we notice that each node can add to the frontier independently
+
+    #pragma omp parallel for
     for (int i=0; i<frontier->count; i++) {
 
         int node = frontier->vertices[i];
 
+        // get the start and end for the chunk of neighbors for this node
         int start_edge = g->outgoing_starts[node];
         int end_edge = (node == g->num_nodes - 1)
                            ? g->num_edges
@@ -44,15 +83,24 @@ void top_down_step(
         // attempt to add all neighbors to the new frontier
         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
             int outgoing = g->outgoing_edges[neighbor];
-
+            // we do not wish to add any neighbors that already exists in our frontier 
             if (distances[outgoing] == NOT_VISITED_MARKER) {
                 distances[outgoing] = distances[node] + 1;
-                int index = new_frontier->count++;
+
+                int index;
+                #pragma omp critical 
+                {
+                    index = new_frontier->count;
+                    new_frontier->count++;
+                }
                 new_frontier->vertices[index] = outgoing;
             }
         }
     }
 }
+// END OF NEW TOP_DOWN_STEP
+
+
 
 // Implements top-down BFS.
 //
