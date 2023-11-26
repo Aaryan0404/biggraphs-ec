@@ -72,26 +72,32 @@ void top_down_step(
     #pragma omp parallel for 
     for (int i=0; i<frontier->count; i++) {
         int node = frontier->vertices[i];
-
         // get the start and end for the chunk of neighbors for this node
         int start_edge = g->outgoing_starts[node];
         int end_edge = (node == g->num_nodes - 1)
                            ? g->num_edges
                            : g->outgoing_starts[node + 1];
         // attempt to add all neighbors to the new frontier
+        int amnt = end_edge - start_edge;
+        int actual[amnt];
+        int j = 0;
+        int old;
         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
             int outgoing = g->outgoing_edges[neighbor];
-            // we do not wish to add any neighbors that already exist in our frontier 
-            if (distances[outgoing] == NOT_VISITED_MARKER) {
-                distances[outgoing] = distances[node] + 1;
-
-                int index = new_frontier->count;
-                while (!__sync_bool_compare_and_swap(&new_frontier->count, index, new_frontier->count+1)) {
-                    index = new_frontier->count;
-                }
-                
-                new_frontier->vertices[index] = outgoing;
-            }
+            old = distances[outgoing];
+            if (old == NOT_VISITED_MARKER && __sync_bool_compare_and_swap(&distances[outgoing], old, distances[node]+1)) {
+                actual[j++] = neighbor;
+            } else {
+                amnt--;
+            } 
+        }
+        int start = new_frontier->count;
+        while (!__sync_bool_compare_and_swap(&new_frontier->count, start, new_frontier->count+amnt)) {
+            start = new_frontier->count;
+        }
+        for (int actual_idx = 0; actual_idx < j; actual_idx++) {
+            int outgoing = g->outgoing_edges[actual[actual_idx]];
+            new_frontier->vertices[start++] = outgoing; 
         }
     }
 }
@@ -149,6 +155,7 @@ void bottom_up_step(
     vertex_set* new_frontier,
     int* distances)
 {
+    return;
     for (Vertex v = 0; v < g->num_nodes; v++) {
         if (distances[v] != NOT_VISITED_MARKER)
             continue;
