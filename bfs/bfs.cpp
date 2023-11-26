@@ -89,6 +89,7 @@ void top_down_step(
                 while (!__sync_bool_compare_and_swap(&new_frontier->count, index, new_frontier->count+1)) {
                     index = new_frontier->count;
                 }
+                
                 new_frontier->vertices[index] = outgoing;
             }
         }
