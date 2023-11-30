@@ -103,7 +103,6 @@ void top_down_step_fast(Graph g,
             frontier->vertices[cum[i] + j] = v.vertices[j];
         }
         // reset for next top_down_step
-        // v.count = 0;
         vertex_sets[i].count = 0;
     }
 
@@ -181,32 +180,56 @@ void bottom_up_step(
     }
 }
 
+int bottom_up_step_fast(
+    Graph g,
+    int* frontier,
+    int* distances,
+    int max_distance)
+{
+    // every BFS step pushes out frontier by 1 (i.e. adding 1 to the max distance found in graph)
+    int next_distance = max_distance + 1;
+    int amnt_done = 0;
+
+    #pragma omp parallel for
+    for (Vertex v=0; v<g->num_nodes; v++) {
+        if (distances[v] != NOT_VISITED_MARKER)
+            continue;
+        Vertex start_edge = g->incoming_starts[v];
+        Vertex end_edge = (v == g->num_nodes - 1)
+                        ? g->num_edges
+                        : g->incoming_starts[v+1];
+        for (int u_idx = start_edge; u_idx < end_edge; u_idx++) {
+            Vertex u = g->incoming_edges[u_idx];
+            // check if this neighbor is a part of the latest frontier
+            if (frontier[u] == max_distance) {
+                distances[v] = distances[u] + 1;
+                frontier[v] = next_distance;
+                #pragma atomic
+                amnt_done++;
+                break; // early exit bc we just need at LEAST one neighbor in the latest frontier
+            }
+        }
+    } 
+    return amnt_done;
+}
+
+
 void bfs_bottom_up(Graph graph, solution* sol)
 {
-    // print_graph(graph);
-    vertex_set list1;
-    vertex_set list2;
-    vertex_set_init(&list1, graph->num_nodes);
-    vertex_set_init(&list2, graph->num_nodes);
-
+    int* frontier = new int[graph->num_nodes];
+    #pragma omp parallel for
     for(int i=0; i<graph->num_nodes; i++) {
-        sol->distances[i] = NOT_VISITED_MARKER;
+        frontier[i] = sol->distances[i] = NOT_VISITED_MARKER;
     }
     
-    vertex_set* frontier = &list1;
-    vertex_set* new_frontier = &list2;
-
-    // setup frontier with the root node
-    frontier->vertices[frontier->count++] = ROOT_NODE_ID;
-    sol->distances[ROOT_NODE_ID] = 0;
-
-    while (frontier->count != 0) {
-        vertex_set_clear(new_frontier);
-        bottom_up_step(graph, frontier, new_frontier, sol->distances);
-        vertex_set* tmp = frontier;
-        frontier = new_frontier;
-        new_frontier = tmp;
+    // setup root node
+    frontier[ROOT_NODE_ID] = sol->distances[ROOT_NODE_ID] = 0;
+    int distances_count = 1; // we init with the trivial distance of the root node to itself
+    int max_distance = 0;
+    while (distances_count != 0) {
+        distances_count = bottom_up_step_fast(graph, frontier, sol->distances, max_distance++);
     }
+    delete frontier;
 }
 
 void bfs_hybrid(Graph graph, solution* sol)
