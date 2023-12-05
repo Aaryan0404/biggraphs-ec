@@ -11,6 +11,8 @@
 
 #define ROOT_NODE_ID 0
 #define NOT_VISITED_MARKER -1
+#define TOP_DOWN 1
+#define BOTTOM_UP 2
 
 void vertex_set_clear(vertex_set* list) {
     list->count = 0;
@@ -64,7 +66,8 @@ void top_down_step_fast(Graph g,
 {
     int n_threads = omp_get_max_threads();
     vertex_set* vertex_sets = *v_sets;
-    #pragma omp parallel for
+    int chunk = (int) (frontier->count / (n_threads * 100)) + 100;
+    #pragma omp parallel for schedule(dynamic, chunk)
     for (int i = 0; i < frontier->count; i++) {
         int tid = omp_get_thread_num();
         int node = frontier->vertices[i];
@@ -118,28 +121,30 @@ void top_down_step_fast(Graph g,
 // distance to the root is stored in sol.distances.
 void bfs_top_down(Graph graph, solution* sol) {
 
+    double start, end;
     vertex_set list1;
-    // vertex_set list2;
     vertex_set_init(&list1, graph->num_nodes);
-    // vertex_set_init(&list2, graph->num_nodes);
 
     vertex_set* frontier = &list1;
-    // vertex_set* new_frontier = &list2;
 
     // initialize all nodes to NOT_VISITED
+    int chunk = (int) (graph->num_nodes / omp_get_max_threads() * 100) + 100;
+    #pragma omp parallel for schedule(dynamic, chunk)
     for (int i=0; i<graph->num_nodes; i++)
         sol->distances[i] = NOT_VISITED_MARKER;
-
     // setup frontier with the root node
     frontier->vertices[frontier->count++] = ROOT_NODE_ID;
     sol->distances[ROOT_NODE_ID] = 0;
     
     int n_threads = omp_get_max_threads();
     vertex_set* v_sets = new vertex_set[n_threads];
+    #pragma omp parallel for schedule(dynamic, chunk)
     for (int i = 0; i < n_threads; i++) {
         vertex_set_init(&v_sets[i], graph->num_nodes);
     }
+    int i = 0;
     while (frontier->count != 0) {
+        i++;
         top_down_step_fast(graph, frontier, &v_sets, sol->distances);
     }
     delete v_sets;
@@ -189,6 +194,8 @@ int bottom_up_step_fast(
     // every BFS step pushes out frontier by 1 (i.e. adding 1 to the max distance found in graph)
     int next_distance = max_distance + 1;
     int amnt_done = 0;
+    int num_threads = omp_get_max_threads();
+    int chunk = (int) (g->num_nodes / (num_threads * 100)) + 100;
 
     #pragma omp parallel for
     for (Vertex v=0; v<g->num_nodes; v++) {
@@ -232,10 +239,97 @@ void bfs_bottom_up(Graph graph, solution* sol)
     delete frontier;
 }
 
+
+void bottom_to_top(
+    Graph g, vertex_set* top_frontier, 
+    int* bottom_frontier, int max_distance, 
+    vertex_set* v_sets) 
+{
+    int n_threads = omp_get_max_threads();
+    // clear out the vertex sets (might have results from a old top down step)
+    for (int i = 0; i < n_threads; i++) {
+        vertex_set_clear(&v_sets[i]);
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < g->num_nodes; i++) {
+        int tid = omp_get_thread_num();
+        vertex_set* vset = &v_sets[tid];
+        if (bottom_frontier[i] == max_distance) {
+            // trivially atomic because of indexing vsets by tid
+            vset->vertices[vset->count++] = i;
+        }
+    }
+    top_frontier->count = 0;
+
+}
+
+void top_to_bottom(Graph g, vertex_set* top_frontier, int* bottom_frontier, int& max_distance, vertex_set* v_sets) {
+    int n_threads = omp_get_max_threads();
+    max_distance++;
+    #pragma omp parallel for
+    for (int i = 0; i < top_frontier->count; i++) {
+        bottom_frontier[top_frontier->vertices[i]] = max_distance;
+    }
+}
+
 void bfs_hybrid(Graph graph, solution* sol)
 {
-    // CS149 students:
-    //
-    // You will need to implement the "hybrid" BFS here as
-    // described in the handout.
+    // since we are leveraging both the bottom up and top down implementations from previous parts
+    // we must init the data structures used in those implementations
+    int* bottom_frontier = new int[graph->num_nodes];
+    vertex_set list1, list2;
+    vertex_set_init(&list1, graph->num_nodes);
+    vertex_set* frontier = &list1;
+    int n_threads = omp_get_max_threads();
+    // setup top down frontier (this is basically the same from top_down() above)
+    frontier->vertices[frontier->count++] = ROOT_NODE_ID;
+
+    vertex_set* v_sets = new vertex_set[n_threads];
+    #pragma omp parallel
+    {
+    #pragma omp for nowait
+    for (int i = 0; i < n_threads; i++) {
+        vertex_set_init(&v_sets[i], graph->num_nodes);
+    }
+    #pragma omp for
+    for (int i = 0; i < graph->num_nodes; i++) {
+        bottom_frontier[i] = sol->distances[i] = NOT_VISITED_MARKER;
+    }
+    }
+
+    bottom_frontier[0] = sol->distances[ROOT_NODE_ID] = 0;
+    int max_distance = 0;
+    bool prev_state = 0;
+    bool do_top_down = true;
+    // the following two variables will provide heuristic of when to txn btwn top-down & bottom-up
+    int n_nodes_to_explore = graph->num_nodes;
+    int frontier_size = 0;
+
+    while (true) {
+        // if there is at least x times more nodes in the frontier set than in the unexplored,
+        // we def want to do bottom-up because bottom up allows for unexplored nodes to look up to the set
+        if (do_top_down && (frontier_size * 100) / n_nodes_to_explore > 10) {
+            do_top_down = false;
+        }
+
+        if (do_top_down) {
+            // we must convert our representations to match the variant that will be used in this step
+            if (prev_state == BOTTOM_UP)
+                bottom_to_top(graph, frontier, bottom_frontier, max_distance, v_sets);
+            top_down_step_fast(graph, frontier, &v_sets, sol->distances);
+            // same exit condition as in above top_down()
+            if (frontier->count == 0)
+                break;
+            prev_state = TOP_DOWN;
+            n_nodes_to_explore -= frontier->count;
+        } else {
+            if (prev_state == TOP_DOWN)
+                top_to_bottom(graph, frontier, bottom_frontier, max_distance, v_sets);
+            int amnt_added = bottom_up_step_fast(graph, bottom_frontier, sol->distances, max_distance++);
+            if (amnt_added == 0)
+                break;
+            prev_state = BOTTOM_UP;
+            n_nodes_to_explore -= amnt_added;
+        }
+    }
 }
