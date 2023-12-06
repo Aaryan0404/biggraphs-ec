@@ -31,7 +31,8 @@ void top_down_step_fast(Graph g,
 {
     int n_threads = omp_get_max_threads();
     vertex_set* vertex_sets = *v_sets;
-    int node_section_size = 100 + (int) (frontier->count / (n_threads * 100));
+    int node_section_size = 100 + ((int) (frontier->count / (n_threads * 100)))/(n_threads/8);
+
     #pragma omp parallel for schedule(dynamic, node_section_size)
     for (int i = 0; i < frontier->count; i++) {
         int tid = omp_get_thread_num();
@@ -96,8 +97,8 @@ void bfs_top_down(Graph graph, solution* sol) {
     vertex_set* frontier = &list1;
 
     // initialize all nodes to NOT_VISITED
-    int chunk = (int) (graph->num_nodes / omp_get_max_threads() * 100);
-    chunk += 100;
+    int chunk = 100 + ((int) (graph->num_nodes / omp_get_max_threads() * 100))/(omp_get_max_threads()/8);
+
     #pragma omp parallel for schedule(dynamic, chunk)
     for (int i=0; i<graph->num_nodes; i++)
         sol->distances[i] = NOT_VISITED_MARKER;
@@ -129,7 +130,7 @@ int bottom_up_step_fast(
     int num_threads = omp_get_max_threads();
     int amnt_done[num_threads];
     memset(&amnt_done, 0, num_threads * sizeof(int));
-    int node_section_size = 100 + (int) (g->num_nodes / (num_threads * 100)) + 100;
+    int node_section_size = 100 + ((int) (g->num_nodes / (num_threads * 100)) + 100)/(num_threads/8);
 
     #pragma omp parallel for schedule(dynamic, node_section_size)
     for (Vertex v=0; v<g->num_nodes; v++) {
@@ -161,7 +162,11 @@ void bfs_bottom_up(Graph graph, solution* sol)
 {
     // unsigned char* frontier = new unsigned char[graph->num_nodes];
     unsigned char* frontier = (unsigned char*)malloc(sizeof(unsigned char) * graph->num_nodes);
-    #pragma omp parallel for schedule(dynamic, 4)
+
+    int num_threads = omp_get_max_threads(); 
+    int node_section_size = 100 + ((int) (graph->num_nodes / (num_threads * 100)) + 100)/(num_threads/8);
+
+    #pragma omp parallel for schedule(dynamic, node_section_size)
     for(int i=0; i<graph->num_nodes; i++) {
         sol->distances[i] = NOT_VISITED_MARKER;
         frontier[i] = 0;
@@ -241,13 +246,13 @@ void bfs_hybrid(Graph graph, solution* sol)
     for (int i = 0; i < n_threads; i++) {
         vertex_set_init(&v_sets[i], graph->num_nodes);
     }
-    #pragma omp for schedule(dynamic, 10)
+    int node_section_size = 100 + ((int) (graph->num_nodes / (n_threads * 100)) + 100)/(n_threads/8);
+    #pragma omp for schedule(dynamic, node_section_size)
     for (int i=0; i<graph->num_nodes; i++) {
         sol->distances[i] = NOT_VISITED_MARKER;
         bottom_frontier[i] = 0;
     }
     }
-
     unsigned char clock = 1;
     sol->distances[ROOT_NODE_ID] = 0;
     bottom_frontier[ROOT_NODE_ID] = clock; 
