@@ -23,42 +23,7 @@ void vertex_set_init(vertex_set* list, int count) {
     list->vertices = (int*)malloc(sizeof(int) * list->max_vertices);
     vertex_set_clear(list);
 }
-
-// Take one step of "top-down" BFS.  For each vertex on the frontier,
-// follow all outgoing edges, and add all neighboring vertices to the
-// new_frontier.
-// void top_down_step(
-//     Graph g,
-//     vertex_set* frontier,
-//     vertex_set* new_frontier,
-//     int* distances)
-// {
-
-//     // going through all the nodes on the frontier
-//     for (int i=0; i<frontier->count; i++) {
-
-//         int node = frontier->vertices[i];
-
-//         // get the start and end for the chunk of neighbors for this node
-//         int start_edge = g->outgoing_starts[node];
-//         int end_edge = (node == g->num_nodes - 1)
-//                            ? g->num_edges
-//                            : g->outgoing_starts[node + 1];
-
-//         // attempt to add all neighbors to the new frontier
-//         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
-//             int outgoing = g->outgoing_edges[neighbor];
-//             // we do not wish to add any neighbors that already exists in our frontier 
-//             if (distances[outgoing] == NOT_VISITED_MARKER) {
-//                 distances[outgoing] = distances[node] + 1;
-//                 int index = new_frontier->count++;
-//                 new_frontier->vertices[index] = outgoing;
-//             }
-//         }
-//     }
-// }
  
-
 void top_down_step_fast(Graph g,
     vertex_set* frontier,
     vertex_set** v_sets,
@@ -66,8 +31,8 @@ void top_down_step_fast(Graph g,
 {
     int n_threads = omp_get_max_threads();
     vertex_set* vertex_sets = *v_sets;
-    int chunk = (int) (frontier->count / (n_threads * 100)) + 100;
-    #pragma omp parallel for schedule(dynamic, chunk)
+    int node_section_size = 100 + (int) (frontier->count / (n_threads * 100));
+    #pragma omp parallel for schedule(dynamic, node_section_size)
     for (int i = 0; i < frontier->count; i++) {
         int tid = omp_get_thread_num();
         int node = frontier->vertices[i];
@@ -78,11 +43,14 @@ void top_down_step_fast(Graph g,
         for (int neighbor = start_edge; neighbor < end_edge; neighbor++) {
             int outgoing = g->outgoing_edges[neighbor];
             // if some other thread is taking care of this node, then this thread ignores
-            if (!__sync_bool_compare_and_swap(&distances[outgoing], NOT_VISITED_MARKER, distances[node] + 1))
-                continue;
-            // trivially atomic because it is a per-thread count
-            int index = vertex_sets[tid].count++;
-            vertex_sets[tid].vertices[index] = outgoing;
+            int old = distances[outgoing];
+            if (old == NOT_VISITED_MARKER) {
+                if (!__sync_bool_compare_and_swap(&distances[outgoing], NOT_VISITED_MARKER, distances[node] + 1))
+                    continue;
+                int index = vertex_sets[tid].count++;
+                // trivially atomic because it is a per-thread count
+                vertex_sets[tid].vertices[index] = outgoing;
+            }
         }
     }
     // in this variant, we don't maintain tmp `new_frontier` buffer; we directly update old frontier
@@ -128,7 +96,8 @@ void bfs_top_down(Graph graph, solution* sol) {
     vertex_set* frontier = &list1;
 
     // initialize all nodes to NOT_VISITED
-    int chunk = (int) (graph->num_nodes / omp_get_max_threads() * 100) + 100;
+    int chunk = (int) (graph->num_nodes / omp_get_max_threads() * 100);
+    chunk += 100;
     #pragma omp parallel for schedule(dynamic, chunk)
     for (int i=0; i<graph->num_nodes; i++)
         sol->distances[i] = NOT_VISITED_MARKER;
@@ -142,62 +111,27 @@ void bfs_top_down(Graph graph, solution* sol) {
     for (int i = 0; i < n_threads; i++) {
         vertex_set_init(&v_sets[i], graph->num_nodes);
     }
-    int i = 0;
     while (frontier->count != 0) {
-        i++;
         top_down_step_fast(graph, frontier, &v_sets, sol->distances);
     }
     delete v_sets;
 }
 
-
-
-void bottom_up_step(
-    Graph g,
-    vertex_set* frontier,
-    vertex_set* new_frontier,
-    int* distances)
-{
-    return;
-    for (Vertex v = 0; v < g->num_nodes; v++) {
-        if (distances[v] != NOT_VISITED_MARKER)
-            continue;
-        Vertex start_edge = g->incoming_starts[v];
-        Vertex end_edge = (v == g->num_nodes - 1)
-                        ? g->num_edges
-                        : g->incoming_starts[v + 1];
-        bool added = false;
-        for (int u_id = start_edge; u_id < end_edge; u_id++) {
-            Vertex u = g->incoming_edges[u_id];
-            for (int i = 0; i < frontier->count; i++) {
-                if (frontier->vertices[i] != u)
-                    continue;
-                added = true;
-                int index = new_frontier->count++;
-                new_frontier->vertices[index] = v;
-                distances[v] = distances[u] + 1;
-                break;
-            }
-            if (added) {
-                break;
-            }
-        }
-    }
-}
-
 int bottom_up_step_fast(
     Graph g,
-    int* frontier,
+    unsigned char* frontier,
     int* distances,
-    int max_distance)
+    unsigned char clock)
 {
-    // every BFS step pushes out frontier by 1 (i.e. adding 1 to the max distance found in graph)
-    int next_distance = max_distance + 1;
-    int amnt_done = 0;
+    // every BFS step pushes out frontier by 1 (i.e. tick)
+    unsigned char next_step_index = clock == 255 ? 1 : clock + 1;
+    // int next_distance = max_distance + 1;
     int num_threads = omp_get_max_threads();
-    int chunk = (int) (g->num_nodes / (num_threads * 100)) + 100;
+    int amnt_done[num_threads];
+    memset(&amnt_done, 0, num_threads * sizeof(int));
+    int node_section_size = 100 + (int) (g->num_nodes / (num_threads * 100)) + 100;
 
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(dynamic, node_section_size)
     for (Vertex v=0; v<g->num_nodes; v++) {
         if (distances[v] != NOT_VISITED_MARKER)
             continue;
@@ -208,33 +142,38 @@ int bottom_up_step_fast(
         for (int u_idx = start_edge; u_idx < end_edge; u_idx++) {
             Vertex u = g->incoming_edges[u_idx];
             // check if this neighbor is a part of the latest frontier
-            if (frontier[u] == max_distance) {
+            if (frontier[u] == clock) {
                 distances[v] = distances[u] + 1;
-                frontier[v] = next_distance;
-                #pragma atomic
-                amnt_done++;
+                frontier[v] = next_step_index;
+                amnt_done[omp_get_thread_num()]++;
                 break; // early exit bc we just need at LEAST one neighbor in the latest frontier
             }
         }
-    } 
-    return amnt_done;
+    }
+    int count = 0; 
+    for (int i = 0; i < num_threads; i++) {
+        count += amnt_done[i];
+    }
+    return count;
 }
-
 
 void bfs_bottom_up(Graph graph, solution* sol)
 {
-    int* frontier = new int[graph->num_nodes];
-    #pragma omp parallel for
+    // unsigned char* frontier = new unsigned char[graph->num_nodes];
+    unsigned char* frontier = (unsigned char*)malloc(sizeof(unsigned char) * graph->num_nodes);
+    #pragma omp parallel for schedule(dynamic, 4)
     for(int i=0; i<graph->num_nodes; i++) {
-        frontier[i] = sol->distances[i] = NOT_VISITED_MARKER;
+        sol->distances[i] = NOT_VISITED_MARKER;
+        frontier[i] = 0;
     }
-    
-    // setup root node
-    frontier[ROOT_NODE_ID] = sol->distances[ROOT_NODE_ID] = 0;
-    int distances_count = 1; // we init with the trivial distance of the root node to itself
+    sol->distances[ROOT_NODE_ID] = 0;
+    unsigned char clock = 1;
+    frontier[ROOT_NODE_ID] = clock;
+    int amnt_new_nodes = 1;
     int max_distance = 0;
-    while (distances_count != 0) {
-        distances_count = bottom_up_step_fast(graph, frontier, sol->distances, max_distance++);
+    while (amnt_new_nodes != 0) {
+        amnt_new_nodes = bottom_up_step_fast(graph, frontier, sol->distances, clock);
+        clock = clock == 255 ? 1 : clock + 1;
     }
     delete frontier;
 }
@@ -242,7 +181,7 @@ void bfs_bottom_up(Graph graph, solution* sol)
 
 void bottom_to_top(
     Graph g, vertex_set* top_frontier, 
-    int* bottom_frontier, int max_distance, 
+    unsigned char* bottom_frontier, unsigned char max_distance, 
     vertex_set* v_sets) 
 {
     int n_threads = omp_get_max_threads();
@@ -260,23 +199,34 @@ void bottom_to_top(
         }
     }
     top_frontier->count = 0;
-
 }
 
-void top_to_bottom(Graph g, vertex_set* top_frontier, int* bottom_frontier, int& max_distance, vertex_set* v_sets) {
+void tick_clock(unsigned char* clock, unsigned char * frontier, int num_nodes) {
+	(*clock)++;
+	if (*clock == 255) {
+		#pragma omp parallel for
+		for (int i = 0; i < num_nodes; i++) {
+			frontier[i] = frontier[i] == 255 ? 1 : 0;
+		}
+		(*clock) = 1;
+	}
+}
+
+void top_to_bottom(Graph g, vertex_set* top_frontier, unsigned char* bottom_frontier, unsigned char* clock, vertex_set* v_sets) {
     int n_threads = omp_get_max_threads();
-    max_distance++;
+    tick_clock(clock, bottom_frontier, g->num_nodes);
     #pragma omp parallel for
     for (int i = 0; i < top_frontier->count; i++) {
-        bottom_frontier[top_frontier->vertices[i]] = max_distance;
+        bottom_frontier[top_frontier->vertices[i]] = *clock;
     }
+    
 }
 
 void bfs_hybrid(Graph graph, solution* sol)
 {
     // since we are leveraging both the bottom up and top down implementations from previous parts
     // we must init the data structures used in those implementations
-    int* bottom_frontier = new int[graph->num_nodes];
+    unsigned char* bottom_frontier = new unsigned char[graph->num_nodes];
     vertex_set list1, list2;
     vertex_set_init(&list1, graph->num_nodes);
     vertex_set* frontier = &list1;
@@ -291,45 +241,49 @@ void bfs_hybrid(Graph graph, solution* sol)
     for (int i = 0; i < n_threads; i++) {
         vertex_set_init(&v_sets[i], graph->num_nodes);
     }
-    #pragma omp for
-    for (int i = 0; i < graph->num_nodes; i++) {
-        bottom_frontier[i] = sol->distances[i] = NOT_VISITED_MARKER;
+    #pragma omp for schedule(dynamic, 10)
+    for (int i=0; i<graph->num_nodes; i++) {
+        sol->distances[i] = NOT_VISITED_MARKER;
+        bottom_frontier[i] = 0;
     }
     }
 
-    bottom_frontier[0] = sol->distances[ROOT_NODE_ID] = 0;
-    int max_distance = 0;
-    bool prev_state = 0;
+    unsigned char clock = 1;
+    sol->distances[ROOT_NODE_ID] = 0;
+    bottom_frontier[ROOT_NODE_ID] = clock; 
+    
+    int prev_state = 0;
     bool do_top_down = true;
     // the following two variables will provide heuristic of when to txn btwn top-down & bottom-up
     int n_nodes_to_explore = graph->num_nodes;
     int frontier_size = 0;
 
     while (true) {
-        // if there is at least x times more nodes in the frontier set than in the unexplored,
+        // if there is at least x (x=15) times more nodes in the frontier set than in the unexplored,
         // we def want to do bottom-up because bottom up allows for unexplored nodes to look up to the set
-        if (do_top_down && (frontier_size * 100) / n_nodes_to_explore > 10) {
+        if (do_top_down && (frontier_size * 100) / n_nodes_to_explore > 15) {
             do_top_down = false;
         }
-
         if (do_top_down) {
             // we must convert our representations to match the variant that will be used in this step
             if (prev_state == BOTTOM_UP)
-                bottom_to_top(graph, frontier, bottom_frontier, max_distance, v_sets);
+                bottom_to_top(graph, frontier, bottom_frontier, clock, v_sets);
             top_down_step_fast(graph, frontier, &v_sets, sol->distances);
             // same exit condition as in above top_down()
             if (frontier->count == 0)
                 break;
             prev_state = TOP_DOWN;
-            n_nodes_to_explore -= frontier->count;
+            frontier_size = frontier->count;
         } else {
             if (prev_state == TOP_DOWN)
-                top_to_bottom(graph, frontier, bottom_frontier, max_distance, v_sets);
-            int amnt_added = bottom_up_step_fast(graph, bottom_frontier, sol->distances, max_distance++);
-            if (amnt_added == 0)
+                top_to_bottom(graph, frontier, bottom_frontier, &clock, v_sets);
+            frontier_size = bottom_up_step_fast(graph, bottom_frontier, sol->distances, clock);
+            tick_clock(&clock, bottom_frontier, graph->num_nodes);
+            if (frontier_size == 0)
                 break;
             prev_state = BOTTOM_UP;
-            n_nodes_to_explore -= amnt_added;
         }
+        n_nodes_to_explore -= frontier_size;
     }
+    delete bottom_frontier;
 }
